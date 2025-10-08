@@ -37,6 +37,10 @@ import android.bluetooth.le.ScanSettings;
 import android.bluetooth.le.ScanFilter;
 import android.bluetooth.le.ScanResult;
 import android.bluetooth.le.ScanCallback;
+import android.bluetooth.le.AdvertisingSet;
+import android.bluetooth.le.AdvertisingSetCallback;
+import android.bluetooth.le.AdvertisingSetParameters;
+import android.bluetooth.le.PeriodicAdvertisingParameters;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -77,6 +81,8 @@ public class BluetoothLePlugin extends CordovaPlugin {
   private CallbackContext addServiceCallback;
   private CallbackContext advertiseCallbackContext;
   private boolean isAdvertising = false;
+  private AdvertisingSet currentAdvertisingSet = null;
+  private AdvertisingSetCallback advertisingSetCallback = null;
 
   //Store connections and all their callbacks
   private HashMap<Object, HashMap<Object, Object>> connections;
@@ -705,21 +711,10 @@ public class BluetoothLePlugin extends CordovaPlugin {
       return;
     }
 
-    AdvertiseSettings.Builder settingsBuilder = new AdvertiseSettings.Builder();
-
     String modeS = obj.optString("mode", "balanced");
-    int mode = AdvertiseSettings.ADVERTISE_MODE_BALANCED;
-    if (modeS.equals("lowLatency")) {
-      mode = AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY;
-    } else if (modeS.equals("lowPower")) {
-      mode = AdvertiseSettings.ADVERTISE_MODE_LOW_POWER;
-    }
-    settingsBuilder.setAdvertiseMode(mode);
-
     boolean connectable = obj.optBoolean("connectable", true);
-    settingsBuilder.setConnectable(connectable);
-
     int timeout = obj.optInt("timeout", 1000);
+    
     if (timeout < 0 || timeout > 180000) {
       JSONObject returnObj = new JSONObject();
 
@@ -729,23 +724,13 @@ public class BluetoothLePlugin extends CordovaPlugin {
       callbackContext.error(returnObj);
       return;
     }
+    
     String adapterName = obj.optString("name");
     bluetoothAdapter.setName(adapterName);
 
-    settingsBuilder.setTimeout(timeout);
-
     String txPowerLevelS = obj.optString("txPowerLevel", "medium");
-    int txPowerLevel = AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM;
-    if (txPowerLevelS.equals("high")) {
-      txPowerLevel = AdvertiseSettings.ADVERTISE_TX_POWER_HIGH;
-    } else if (txPowerLevelS.equals("low")) {
-      txPowerLevel = AdvertiseSettings.ADVERTISE_TX_POWER_LOW;
-    } else if (txPowerLevelS.equals("ultraLow")) {
-      txPowerLevel = AdvertiseSettings.ADVERTISE_TX_POWER_ULTRA_LOW;
-    }
-    settingsBuilder.setTxPowerLevel(txPowerLevel);
-    AdvertiseSettings advertiseSettings = settingsBuilder.build();
 
+    // Build advertise data
     AdvertiseData.Builder dataBuilder = new AdvertiseData.Builder();
 
     int manufacturerId = obj.optInt("manufacturerId", 0);
@@ -765,14 +750,83 @@ public class BluetoothLePlugin extends CordovaPlugin {
     }
 
     dataBuilder.setIncludeDeviceName(obj.optBoolean("includeDeviceName", true));
-
     dataBuilder.setIncludeTxPowerLevel(obj.optBoolean("includeTxPowerLevel", true));
-
     AdvertiseData advertiseData = dataBuilder.build();
 
     advertiseCallbackContext = callbackContext;
 
-    advertiser.startAdvertising(advertiseSettings, advertiseData, advertiseCallback);
+    // Use new AdvertisingSet API for Android O (API 26) and above
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+      AdvertisingSetParameters.Builder paramsBuilder = new AdvertisingSetParameters.Builder();
+      
+      // Set connectable
+      paramsBuilder.setConnectable(connectable);
+      
+      // Set legacy mode for compatibility
+      paramsBuilder.setLegacyMode(true);
+      
+      // Set scan mode (interval)
+      if (modeS.equals("lowLatency")) {
+        paramsBuilder.setInterval(80); // 80 * 0.625ms = 50ms interval for low latency
+      } else if (modeS.equals("lowPower")) {
+        paramsBuilder.setInterval(1600); // 1600 * 0.625ms = 1000ms interval for low power
+      } else { // balanced
+        paramsBuilder.setInterval(400); // 400 * 0.625ms = 250ms interval for balanced
+      }
+      
+      // Set TX power level
+      int txPowerLevel = AdvertisingSetParameters.TX_POWER_MEDIUM;
+      if (txPowerLevelS.equals("high")) {
+        txPowerLevel = AdvertisingSetParameters.TX_POWER_HIGH;
+      } else if (txPowerLevelS.equals("low")) {
+        txPowerLevel = AdvertisingSetParameters.TX_POWER_LOW;
+      } else if (txPowerLevelS.equals("ultraLow")) {
+        txPowerLevel = AdvertisingSetParameters.TX_POWER_ULTRA_LOW;
+      }
+      paramsBuilder.setTxPowerLevel(txPowerLevel);
+      
+      AdvertisingSetParameters params = paramsBuilder.build();
+      
+      // Build periodic advertising parameters if needed
+      PeriodicAdvertisingParameters periodicParams = null;
+      if (obj.optBoolean("enablePeriodic", false)) {
+        PeriodicAdvertisingParameters.Builder periodicBuilder = new PeriodicAdvertisingParameters.Builder();
+        periodicBuilder.setIncludeTxPower(obj.optBoolean("periodicIncludeTxPower", true));
+        
+        // Set periodic interval (default to same as advertising interval)
+        int periodicInterval = obj.optInt("periodicInterval", modeS.equals("lowLatency") ? 80 : 400);
+        periodicParams = periodicBuilder.build();
+      }
+      
+      // Start advertising with new API
+      advertiser.startAdvertisingSet(params, advertiseData, null, periodicParams, null, advertisingSetCallback);
+    } else {
+      // Use legacy API for older Android versions
+      AdvertiseSettings.Builder settingsBuilder = new AdvertiseSettings.Builder();
+
+      int mode = AdvertiseSettings.ADVERTISE_MODE_BALANCED;
+      if (modeS.equals("lowLatency")) {
+        mode = AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY;
+      } else if (modeS.equals("lowPower")) {
+        mode = AdvertiseSettings.ADVERTISE_MODE_LOW_POWER;
+      }
+      settingsBuilder.setAdvertiseMode(mode);
+      settingsBuilder.setConnectable(connectable);
+      settingsBuilder.setTimeout(timeout);
+
+      int txPowerLevel = AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM;
+      if (txPowerLevelS.equals("high")) {
+        txPowerLevel = AdvertiseSettings.ADVERTISE_TX_POWER_HIGH;
+      } else if (txPowerLevelS.equals("low")) {
+        txPowerLevel = AdvertiseSettings.ADVERTISE_TX_POWER_LOW;
+      } else if (txPowerLevelS.equals("ultraLow")) {
+        txPowerLevel = AdvertiseSettings.ADVERTISE_TX_POWER_ULTRA_LOW;
+      }
+      settingsBuilder.setTxPowerLevel(txPowerLevel);
+      AdvertiseSettings advertiseSettings = settingsBuilder.build();
+
+      advertiser.startAdvertising(advertiseSettings, advertiseData, advertiseCallback);
+    }
   }
 
   private void stopAdvertisingAction(JSONArray args, CallbackContext callbackContext) {
@@ -787,7 +841,13 @@ public class BluetoothLePlugin extends CordovaPlugin {
       return;
     }
 
-    advertiser.stopAdvertising(advertiseCallback);
+    // Stop advertising using appropriate API
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O && currentAdvertisingSet != null) {
+      advertiser.stopAdvertisingSet(advertisingSetCallback);
+      currentAdvertisingSet = null;
+    } else {
+      advertiser.stopAdvertising(advertiseCallback);
+    }
 
     if (isAdvertising) isAdvertising = false;
 
@@ -3208,6 +3268,59 @@ public class BluetoothLePlugin extends CordovaPlugin {
         advertiseCallbackContext = null;
       }
     };
+
+    // Create AdvertisingSetCallback for API 26+
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+      advertisingSetCallback = new AdvertisingSetCallback() {
+        @Override
+        public void onAdvertisingSetStarted(AdvertisingSet advertisingSet, int txPower, int status) {
+          if (status == AdvertisingSetCallback.ADVERTISE_SUCCESS) {
+            currentAdvertisingSet = advertisingSet;
+            isAdvertising = true;
+
+            if (advertiseCallbackContext != null) {
+              JSONObject returnObj = new JSONObject();
+              addProperty(returnObj, "txPowerLevel", txPower);
+              addProperty(returnObj, keyStatus, "advertisingStarted");
+
+              advertiseCallbackContext.success(returnObj);
+              advertiseCallbackContext = null;
+            }
+          } else {
+            isAdvertising = false;
+            currentAdvertisingSet = null;
+
+            if (advertiseCallbackContext != null) {
+              JSONObject returnObj = new JSONObject();
+              addProperty(returnObj, keyError, "startAdvertising");
+              
+              if (status == AdvertisingSetCallback.ADVERTISE_FAILED_ALREADY_STARTED) {
+                addProperty(returnObj, keyMessage, "Already started");
+              } else if (status == AdvertisingSetCallback.ADVERTISE_FAILED_DATA_TOO_LARGE) {
+                addProperty(returnObj, keyMessage, "Too large data");
+              } else if (status == AdvertisingSetCallback.ADVERTISE_FAILED_FEATURE_UNSUPPORTED) {
+                addProperty(returnObj, keyMessage, "Feature unsupported");
+              } else if (status == AdvertisingSetCallback.ADVERTISE_FAILED_INTERNAL_ERROR) {
+                addProperty(returnObj, keyMessage, "Internal error");
+              } else if (status == AdvertisingSetCallback.ADVERTISE_FAILED_TOO_MANY_ADVERTISERS) {
+                addProperty(returnObj, keyMessage, "Too many advertisers");
+              } else {
+                addProperty(returnObj, keyMessage, "Advertising error: " + status);
+              }
+
+              advertiseCallbackContext.error(returnObj);
+              advertiseCallbackContext = null;
+            }
+          }
+        }
+
+        @Override
+        public void onAdvertisingSetStopped(AdvertisingSet advertisingSet) {
+          isAdvertising = false;
+          currentAdvertisingSet = null;
+        }
+      };
+    }
   }
 
   private String formatUuid(UUID uuid) {
